@@ -1,0 +1,26 @@
+version: '3.8'
+services:
+  financial-signals:
+    build: .
+    ports:
+      - "8501:8501"
+    environment:
+      - ALPHA_VANTAGE_API=${ALPHA_VANTAGE_API}
+      - NEWS_API=${NEWS_API}
+      - SNOWFLAKE_ACCOUNT=${SNOWFLAKE_ACCOUNT}
+      - SNOWFLAKE_USER=${SNOWFLAKE_USER}
+      - SNOWFLAKE_PASSWORD=${SNOWFLAKE_PASSWORD}
+    volumes:
+      - ./data:/app/data
+    command: streamlit run streamlit_app.py --server.address 0.0.0.0 --server.port 8501
+
+  # Optional: Add Redis for caching
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
