@@ -258,6 +258,8 @@ def main():
 
         st.markdown("---")
 
+        
+
         # Technical Indicators Section
         st.subheader("📊 Technical Indicators")
 
@@ -468,43 +470,264 @@ def main():
         styled_df = df_history.style.applymap(color_signal, subset=['Signal'])
         st.dataframe(styled_df, use_container_width=True)
 
+        
+    
+
+        # --- Cross-Asset Correlation (Snowflake Cortex) ---
+        st.markdown("---")
+        st.subheader("🔗 Cross-Asset Correlation Radar")
+
+        corr_col1, corr_col2 = st.columns([2, 1])
+        with corr_col2:
+            window_days = st.slider("Window (days)", 7, 180, 30)
+            corr_threshold = st.slider("Correlation threshold", 0.1, 0.95, 0.6, step=0.05)
+            symbols_input = st.text_area("Symbols (comma separated)", value="AAPL,MSFT,GOOGL,NVDA,TSLA")
+            run_corr = st.button("Generate Correlation")
+
+        with corr_col1:
+            symbols = [s.strip().upper() for s in symbols_input.split(",") if s.strip()]
+            st.markdown(f"Selected symbols: **{', '.join(symbols)}**")
+
+            if run_corr:
+                if not symbols:
+                    st.error("Please provide at least two symbols.")
+                else:
+                    try:
+                        edges = st.session_state.snowflake_client.get_cross_asset_correlation(
+                            symbols, window_days=window_days, correlation_threshold=corr_threshold
+                        )
+                    except AttributeError:
+                        # Fallback to mock if method not available
+                        try:
+                            edges = st.session_state.snowflake_client._mock_cross_asset_correlation(symbols)
+                        except Exception as e:
+                            st.error(f"Correlation unavailable: {e}")
+                            edges = []
+
+                    if not edges:
+                        st.info("No correlations above the threshold. Try lowering the threshold or changing symbols.")
+                    else:
+                        # Show edges table
+                        df_edges = pd.DataFrame(edges)
+                        st.table(df_edges)
+
+                        # Simple circular network layout for visualization
+                        # compute node positions on a circle
+                        unique_nodes = list({e['source'] for e in edges} | {e['target'] for e in edges})
+                        n = len(unique_nodes)
+                        angle_step = 2 * np.pi / max(n, 1)
+                        positions = {
+                            node: (np.cos(i * angle_step), np.sin(i * angle_step))
+                            for i, node in enumerate(unique_nodes)
+                        }
+
+                        fig = go.Figure()
+
+                        # Add edges as lines
+                        for e in edges:
+                            x0, y0 = positions[e['source']]
+                            x1, y1 = positions[e['target']]
+                            color = "#10b981" if e.get('relation') == "POSITIVE" else "#ef4444"
+                            width = 1 + abs(e.get('correlation', 0)) * 3
+                            fig.add_trace(go.Scatter(
+                                x=[x0, x1], y=[y0, y1],
+                                mode="lines",
+                                line=dict(color=color, width=width),
+                                hoverinfo="text",
+                                text=f"{e['source']} ↔ {e['target']}: {e['correlation']}"
+                            ))
+
+                        # Add nodes
+                        node_x = [positions[n][0] for n in unique_nodes]
+                        node_y = [positions[n][1] for n in unique_nodes]
+                        hover_text = []
+                        for node in unique_nodes:
+                            connected = [f"{ed['target']}({ed['correlation']})" if ed['source']==node else f"{ed['source']}({ed['correlation']})"
+                                         for ed in edges if ed['source']==node or ed['target']==node]
+                            hover_text.append(f"{node}<br>Connections: {len(connected)}<br>" + "<br>".join(connected))
+
+                        fig.add_trace(go.Scatter(
+                            x=node_x, y=node_y,
+                            mode='markers+text',
+                            marker=dict(size=22, color="#1f77b4"),
+                            text=unique_nodes,
+                            textposition="bottom center",
+                            hoverinfo="text",
+                            hovertext=hover_text
+                        ))
+
+                        fig.update_layout(
+                            showlegend=False,
+                            xaxis=dict(showgrid=False, zeroline=False, visible=False),
+                            yaxis=dict(showgrid=False, zeroline=False, visible=False),
+                            height=500,
+                            margin=dict(l=20, r=20, t=40, b=20),
+                            title=f"Cross-Asset Correlations (threshold ≥ {corr_threshold})"
+                        )
+
+                        st.plotly_chart(fig, use_container_width=True)
+
+        
+
+
+
+        # --- Anomaly Detection (Snowflake) ---
+        st.markdown("---")
+        st.subheader("🚨 Anomaly Detection")
+
+        anom_col1, anom_col2 = st.columns([2, 1])
+        with anom_col2:
+            anom_window = st.slider("Window (days)", 7, 90, 30)
+            anom_sent_z = st.number_input("Sentiment Z threshold", value=2.5, step=0.1)
+            anom_vol_pct = st.number_input("Volume change threshold (fraction)", value=0.4, step=0.05)
+            anom_symbols = st.text_input("Symbols (comma separated)", value="AAPL,MSFT,GOOGL").upper()
+            run_anom = st.button("Run Anomaly Detection")
+
+        with anom_col1:
+            symbols = [s.strip() for s in anom_symbols.split(",") if s.strip()]
+            st.markdown(f"Checking: **{', '.join(symbols)}**")
+
+            if run_anom:
+                if not symbols or len(symbols) < 1:
+                    st.error("Provide at least one symbol.")
+                else:
+                    try:
+                        anomalies = st.session_state.snowflake_client.detect_anomalies(
+                            symbols,
+                            window_days=anom_window,
+                            sentiment_z_thresh=anom_sent_z,
+                            vol_change_pct=anom_vol_pct
+                        )
+                    except AttributeError:
+                        anomalies = st.session_state.snowflake_client._mock_anomalies(symbols)
+
+                    # ...existing code...
+                    if not anomalies:
+                        sample_data = get_sample_data(symbols[0])  # Get sample data for first symbol
+                        anomalies = sample_data.get('anomalies', [])
+                        
+                        if anomalies:  # Show sample anomalies
+                            df_anom = pd.DataFrame(anomalies)
+                            st.table(df_anom.sort_values(['symbol', 'date']))
+
+                    else:
+                        df_anom = pd.DataFrame(anomalies)
+                        st.markdown("### Detected anomalies")
+                        st.table(df_anom.sort_values(['symbol', 'date']))
+
+                        # display per-anomaly highlights and simple plots
+                        for a in anomalies:
+                            sym = a['symbol']
+                            st.markdown(f"**{sym} — {a['type'].replace('_',' ').title()}** • {a['date']}")
+                            st.caption(a.get('detail', ''))
+                            if a['type'] == 'sentiment_spike':
+                                st.warning(f"Sentiment spike (severity {a['severity']}) for {sym} on {a['date']}")
+                            else:
+                                st.info(f"Price/Volume divergence (severity {a['severity']}) for {sym} on {a['date']}")
+
+                            # try to show small sample price/volume chart (use cached or sample)
+                            try:
+                                # prefer cached if same symbol
+                                if data and data.get('symbol') == sym:
+                                    sdata = data
+                                    # build series around anomaly date
+                                    dates = pd.date_range(end=datetime.now(), periods=30)
+                                    prices = np.random.walk_cumulative(len(dates), start=sdata['stock_data'].get('price', 100)-5, step_std=2)
+                                    volumes = np.random.randint(1000000, 50000000, size=len(dates))
+                                else:
+                                    # fallback to sample generator
+                                    sample = get_sample_data(sym)
+                                    dates = pd.date_range(end=datetime.now(), periods=30)
+                                    prices = np.random.walk_cumulative(len(dates), start=sample['stock_data']['price']-5, step_std=2)
+                                    volumes = np.random.randint(500000, 20000000, size=len(dates))
+                                fig = go.Figure()
+                                fig.add_trace(go.Scatter(x=dates, y=prices, name='Price', yaxis='y1'))
+                                fig.add_trace(go.Bar(x=dates, y=volumes, name='Volume', yaxis='y2', opacity=0.3))
+                                fig.update_layout(
+                                    height=300,
+                                    margin=dict(t=10, b=10),
+                                    yaxis=dict(title='Price', side='left'),
+                                    yaxis2=dict(title='Volume', overlaying='y', side='right', showgrid=False),
+                                    showlegend=True
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                            except Exception:
+                                # If rendering fails, continue
+                                pass
+
+
+
+# ...existing code...
 def get_sample_data(symbol):
-    """Generate sample data for demonstration"""
+    """Generate sample data for demonstration (includes synthetic anomalies)"""
+    base_price = np.random.uniform(100, 300)
+    stock_info = {
+        'price': base_price,
+        'change': np.random.uniform(-10, 10),
+        'change_percent': np.random.uniform(-3, 3),
+        'volume': np.random.randint(1000000, 50000000),
+        'market_cap': np.random.choice(['1.2T', '800B', '2.1T', '1.5T'])
+    }
+
+    # Make some sample news and sentiment
+    news = [
+        {
+            'title': f'{symbol} reports quarterly earnings',
+            'description': f'{symbol} has reported strong quarterly earnings with revenue growth exceeding expectations.',
+            'publishedAt': (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        },
+        {
+            'title': f'{symbol} announces new product launch',
+            'description': f'{symbol} unveiled their latest product innovation at the tech conference.',
+            'publishedAt': (datetime.now() - timedelta(days=2)).strftime('%Y-%m-%d')
+        }
+    ]
+    sentiment = [
+        {'sentiment_score': np.random.uniform(-0.5, 0.8)},
+        {'sentiment_score': np.random.uniform(-0.5, 0.8)}
+    ]
+
+    signals = {
+        'final_signal': np.random.choice(['BUY', 'SELL', 'HOLD'], p=[0.3, 0.2, 0.5]),
+        'confidence': np.random.uniform(0.4, 0.9),
+        'rsi': np.random.uniform(20, 80),
+        'macd': np.random.uniform(-2, 2),
+        'macd_signal': np.random.uniform(-2, 2),
+        'sma_20': np.random.uniform(140, 160),
+        'sma_50': np.random.uniform(135, 155),
+        'bb_position': np.random.uniform(-1.5, 1.5)
+    }
+
+    # Flood with synthetic anomalies for demo/testing
+    anomalies = []
+    num_anom = np.random.randint(3, 8)  # flood with 3-7 anomalies
+    for i in range(num_anom):
+        a_type = np.random.choice(['sentiment_spike', 'price_volume_divergence'])
+        days_ago = np.random.randint(0, 7)
+        an_date = (datetime.now() - timedelta(days=days_ago)).strftime('%Y-%m-%d')
+        severity = float(round(np.random.uniform(0.6, 3.0), 3))
+        if a_type == 'sentiment_spike':
+            detail = f"sentiment={round(np.random.uniform(-1.0, 1.5), 3)}, z={round(np.random.uniform(2.5, 6.0),2)}"
+        else:
+            price_pct = round(np.random.uniform(-0.12, 0.12), 3)
+            vol_pct = round(np.random.uniform(-0.8, 0.8), 3)
+            detail = f"price_pct={price_pct}, vol_pct={vol_pct}"
+
+        anomalies.append({
+            'symbol': symbol,
+            'date': an_date,
+            'type': a_type,
+            'severity': severity,
+            'detail': detail
+        })
+
     return {
         'symbol': symbol,
-        'stock_data': {
-            'price': np.random.uniform(100, 300),
-            'change': np.random.uniform(-10, 10),
-            'change_percent': np.random.uniform(-3, 3),
-            'volume': np.random.randint(1000000, 50000000),
-            'market_cap': np.random.choice(['1.2T', '800B', '2.1T', '1.5T'])
-        },
-        'news_data': [
-            {
-                'title': f'{symbol} reports quarterly earnings',
-                'description': f'{symbol} has reported strong quarterly earnings with revenue growth exceeding expectations.',
-                'publishedAt': '2024-01-01'
-            },
-            {
-                'title': f'{symbol} announces new product launch',
-                'description': f'{symbol} unveiled their latest product innovation at the tech conference.',
-                'publishedAt': '2024-01-01'
-            }
-        ],
-        'sentiment_data': [
-            {'sentiment_score': np.random.uniform(-0.5, 0.8)},
-            {'sentiment_score': np.random.uniform(-0.5, 0.8)}
-        ],
-        'signals': {
-            'final_signal': np.random.choice(['BUY', 'SELL', 'HOLD'], p=[0.3, 0.2, 0.5]),
-            'confidence': np.random.uniform(0.4, 0.9),
-            'rsi': np.random.uniform(20, 80),
-            'macd': np.random.uniform(-2, 2),
-            'macd_signal': np.random.uniform(-2, 2),
-            'sma_20': np.random.uniform(140, 160),
-            'sma_50': np.random.uniform(135, 155),
-            'bb_position': np.random.uniform(-1.5, 1.5)
-        }
+        'stock_data': stock_info,
+        'news_data': news,
+        'sentiment_data': sentiment,
+        'signals': signals,
+        'anomalies': anomalies
     }
 
 # Helper function for random walk

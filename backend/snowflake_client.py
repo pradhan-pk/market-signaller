@@ -1,4 +1,4 @@
-
+from datetime import datetime, timedelta
 import snowflake.connector
 import pandas as pd
 import numpy as np
@@ -232,6 +232,193 @@ class SnowflakeClient:
             })
 
         return pd.DataFrame(data)
+    
+
+    def get_cross_asset_correlation(self, symbols, window_days=30, correlation_threshold=0.6):
+        """
+        Generate cross-asset correlation radar using Snowflake Cortex.
+        Returns a list of edges suitable for visualization (e.g., Plotly Network, D3.js).
+
+        Args:
+            symbols (list): List of asset tickers to compare.
+            window_days (int): Time window for correlation calculation.
+            correlation_threshold (float): Minimum correlation to display as edge.
+        """
+        if not self.connection:
+            if not self.connect():
+                print("⚠️ Using mock correlation data (Snowflake unavailable)")
+                return self._mock_cross_asset_correlation(symbols)
+
+        try:
+            cursor = self.connection.cursor()
+
+            # Prepare symbol list for SQL IN clause
+            symbol_list = ",".join([f"'{s}'" for s in symbols])
+
+            # Query last X days of price data
+            query = f"""
+            WITH price_data AS (
+                SELECT symbol, timestamp::DATE AS dt, AVG(price) AS avg_price
+                FROM TRADING_SIGNALS
+                WHERE symbol IN ({symbol_list})
+                AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL '{window_days} DAYS'
+                GROUP BY symbol, dt
+            ),
+            pivoted AS (
+                SELECT *
+                FROM price_data
+                PIVOT (AVG(avg_price) FOR symbol IN ({symbol_list}))
+            )
+            SELECT * FROM pivoted;
+            """
+
+            cursor.execute(query)
+            df = pd.DataFrame(cursor.fetchall(), columns=[col[0] for col in cursor.description])
+
+            # Drop date column if present and compute correlations
+            df = df.select_dtypes(include=[np.number])
+            corr_matrix = df.corr()
+
+            # Build edges for network graph
+            edges = []
+            for i, sym1 in enumerate(corr_matrix.columns):
+                for j, sym2 in enumerate(corr_matrix.columns):
+                    if i < j:
+                        corr_value = corr_matrix.iloc[i, j]
+                        if abs(corr_value) >= correlation_threshold:
+                            edges.append({
+                                "source": sym1,
+                                "target": sym2,
+                                "correlation": round(float(corr_value), 3),
+                                "relation": "POSITIVE" if corr_value > 0 else "NEGATIVE"
+                            })
+
+            cursor.close()
+            print(f"✅ Generated {len(edges)} correlations above threshold {correlation_threshold}")
+            return edges
+
+        except Exception as e:
+            print(f"Error generating cross-asset correlation: {e}")
+            return self._mock_cross_asset_correlation(symbols)
+
+
+    def _mock_cross_asset_correlation(self, symbols):
+        """Generate mock correlation edges when Snowflake unavailable"""
+        np.random.seed(42)
+        edges = []
+        for i in range(len(symbols)):
+            for j in range(i + 1, len(symbols)):
+                corr = np.random.uniform(-1, 1)
+                if abs(corr) > 0.6:
+                    edges.append({
+                        "source": symbols[i],
+                        "target": symbols[j],
+                        "correlation": round(float(corr), 3),
+                        "relation": "POSITIVE" if corr > 0 else "NEGATIVE"
+                    })
+        return edges
+    
+
+
+    def detect_anomalies(self, symbols, window_days=30, sentiment_z_thresh=2.5, vol_change_pct=0.4):
+        """
+        Detect anomalies for given symbols:
+        - sentiment_spike: sentiment z-score exceeds sentiment_z_thresh
+        - price_volume_divergence: price moves directionally while volume moves opposite beyond vol_change_pct
+        Returns list of anomalies: {symbol, date, type, details}
+        """
+        if not self.connection:
+            if not self.connect():
+                return self._mock_anomalies(symbols)
+
+        try:
+            cursor = self.connection.cursor()
+            symbol_list = ",".join([f"'{s}'" for s in symbols])
+
+            query = f"""
+            SELECT symbol, DATE_TRUNC('DAY', timestamp) AS dt,
+                AVG(price) AS avg_price,
+                AVG(volume) AS avg_volume,
+                AVG(sentiment_score) AS avg_sentiment
+            FROM TRADING_SIGNALS
+            WHERE symbol IN ({symbol_list})
+            AND timestamp >= CURRENT_TIMESTAMP() - INTERVAL '{window_days} DAYS'
+            GROUP BY symbol, dt
+            ORDER BY symbol, dt;
+            """
+
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            cols = [c[0] for c in cursor.description]
+            df = pd.DataFrame(rows, columns=cols)
+
+            if df.empty:
+                cursor.close()
+                return []
+
+            anomalies = []
+            for sym, g in df.groupby('SYMBOL' if 'SYMBOL' in df.columns else 'symbol'):
+                # normalize column names
+                g = g.rename(columns={c: c.lower() for c in g.columns})
+                g = g.sort_values('dt')
+                # sentiment spike detection via z-score
+                if 'avg_sentiment' in g.columns:
+                    s = g['avg_sentiment'].astype(float)
+                    mean = s.mean()
+                    std = s.std(ddof=0) if s.std(ddof=0) != 0 else 1.0
+                    z = (s - mean) / std
+                    spikes = g.loc[z.abs() >= sentiment_z_thresh]
+                    for _, row in spikes.iterrows():
+                        anomalies.append({
+                            "symbol": sym,
+                            "date": str(row['dt']),
+                            "type": "sentiment_spike",
+                            "severity": float(round(abs((row['avg_sentiment'] - mean) / std), 3)),
+                            "detail": f"sentiment={row['avg_sentiment']:.3f}, z={((row['avg_sentiment']-mean)/std):.2f}"
+                        })
+
+                # price-volume divergence
+                if {'avg_price', 'avg_volume'}.issubset(set(g.columns)):
+                    g['price_pct'] = g['avg_price'].pct_change().fillna(0)
+                    g['vol_pct'] = g['avg_volume'].pct_change().fillna(0)
+                    # price up & volume down OR price down & volume up
+                    divergences = g[((g['price_pct'] > 0.02) & (g['vol_pct'] < -vol_change_pct)) |
+                                    ((g['price_pct'] < -0.02) & (g['vol_pct'] > vol_change_pct))]
+                    for _, row in divergences.iterrows():
+                        anomalies.append({
+                            "symbol": sym,
+                            "date": str(row['dt']),
+                            "type": "price_volume_divergence",
+                            "severity": float(round(max(abs(row['price_pct']), abs(row['vol_pct'])), 3)),
+                            "detail": f"price_pct={row['price_pct']:.3f}, vol_pct={row['vol_pct']:.3f}"
+                        })
+
+            cursor.close()
+            print(f"✅ Detected {len(anomalies)} anomalies for window {window_days}d")
+            return anomalies
+
+        except Exception as e:
+            print(f"Error in detect_anomalies: {e}")
+            return self._mock_anomalies(symbols)
+
+
+    def _mock_anomalies(self, symbols):
+        """Return synthetic anomalies when Snowflake not available"""
+        np.random.seed(123)
+        anomalies = []
+        for sym in symbols:
+            if np.random.rand() > 0.7:
+                anomalies.append({
+                    "symbol": sym,
+                    "date": (datetime.now() - timedelta(days=int(np.random.rand()*5))).strftime("%Y-%m-%d"),
+                    "type": np.random.choice(["sentiment_spike", "price_volume_divergence"]),
+                    "severity": float(round(np.random.uniform(0.5, 3.0), 3)),
+                    "detail": "mock anomaly"
+                })
+        return anomalies
+
+
+
 
     def close_connection(self):
         """Close Snowflake connection"""
