@@ -1,25 +1,24 @@
 
 # Core Dependencies
-streamlit==1.28.1
-pandas==2.0.3
-numpy==1.24.3
-python-dotenv==1.0.0
-requests==2.31.0
+streamlit==1.50.0
+pandas==2.3.3
+numpy==2.3.4
+python-dotenv==1.1.1
+requests==2.32.5
 
 # Financial Data Processing
-ta-lib==0.4.25
-yfinance==0.2.18
+ta-lib==0.6.7
+yfinance==0.2.66
 
 # Snowflake Integration
-snowflake-connector-python==3.3.1
+snowflake-connector-python==4.0.0
 
 # Visualization
-plotly==5.16.1
+plotly==6.3.1
 
 # Data Science & Analysis
-scikit-learn==1.3.0
-scipy==1.11.1
+scikit-learn==1.7.2
+scipy==1.16.2
 
 # Optional: For enhanced features
-websockets==11.0.3
-apscheduler==3.10.4
+websockets==15.0.1
