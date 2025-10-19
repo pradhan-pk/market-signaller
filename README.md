@@ -42,7 +42,7 @@ A comprehensive Streamlit-based financial analytics platform that combines real-
 ## 🛠️ Quick Setup
 
 ### 1. Prerequisites
-- Python 3.8+
+- Python 3.12.11
 - API keys for Alpha Vantage, News API
 - Snowflake account (optional but recommended)
 
